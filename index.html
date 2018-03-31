@@ -1,0 +1,104 @@
+<!doctype html>
+
+<button id="pause_or_play" type="button">
+  <img id="button_img" src="play.png">
+</button>
+
+<textarea id="repl"></textarea>
+<button id="runit" type="button">
+  run
+</button>
+
+<script>
+const url = 'ws://127.0.0.1:9229/e9d17c32-1787-4f42-8a48-a683a69babd4';
+
+(async () => {
+  const ws = new WebSocket(url);
+
+  const requests = new Map;
+  let next_id = 1;
+  async function makeRequest(obj) {
+    let id = next_id++;
+    const body = {
+      ...obj,
+      id,
+      type: 'request'
+    };
+    //console.debug('sending', body)
+    ws.send(JSON.stringify(body));
+    return {
+      then(fulfill, reject) {
+        requests.set(id, {
+          fulfill,
+          reject
+        });
+      }
+    };
+  }
+
+  await {
+    then(fulfill, reject) {
+      ws.onopen = fulfill;
+      ws.onerror = reject;
+    }
+  };
+  ws.onerror = null;
+  ws.onmessage = async ({data}) => {
+    const obj = JSON.parse(data);
+    console.log('receiving', obj);
+    if ('method' in obj) {
+      if (obj.method === 'Debugger.paused') {
+        button_img.src = 'play.png';
+        pause_or_play.onclick = () => {
+          makeRequest({
+            method: 'Debugger.resume'
+          });
+        }
+      }
+      if (obj.method === 'Debugger.resumed') {
+        button_img.src = 'pause.png';
+        pause_or_play.onclick = () => {
+          makeRequest({
+            method: 'Debugger.pause'
+          });
+        }
+      }
+    } else if ('error' in obj) {
+      requests.get(obj.id).reject(obj.error);
+    } else if ('result' in obj) {
+      requests.get(obj.id).fulfill(obj.result);
+    } else {
+      throw new Error(data);
+    }
+  };
+  console.log('connected');
+  const init = Promise.all([
+    makeRequest({
+      method: 'Runtime.enable'
+    }),
+    makeRequest({
+      method: 'Debugger.enable'
+    }),
+    makeRequest({
+      method: 'Debugger.pause'
+    })
+  ]);
+  await makeRequest({
+    method: 'Runtime.runIfWaitingForDebugger'
+  });
+  runit.onclick = async () => {
+    const text = repl.value;
+    const response = await makeRequest({
+      method: 'Debugger.evaluateOnCallFrame',
+      params: {
+        expression: text,
+        callFrameId: `{"ordinal":0,"injectedScriptId":1}`,
+        returnByValue: true
+      }
+    });
+    repl.value = response.result.value;
+  }
+  await init;
+})();
+
+</script>
