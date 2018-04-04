@@ -1,0 +1,23 @@
+{
+  "name": "devtools",
+  "version": "1.0.0",
+  "description": "References",
+  "main": "node.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bmeck/devtools-livestream.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/bmeck/devtools-livestream/issues"
+  },
+  "homepage": "https://github.com/bmeck/devtools-livestream#readme",
+  "dependencies": {
+    "monaco-editor": "0.11.1"
+  }
+}

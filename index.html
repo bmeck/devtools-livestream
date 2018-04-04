@@ -1,18 +1,72 @@
 <!doctype html>
 
-<button id="pause_or_play" type="button">
-  <img id="button_img" src="play.png">
-</button>
+<style>
+* {
+  box-sizing: border-box;
+  font-family: monospace;
+}
+html, body {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+}
+body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+}
+[role="log"] {
+  overflow: auto;
+  list-style: none;
+  flex-grow: 0;
+}
+[role="log"] li + li::before {
+  content: "";
+  display: block;
+  border-top: 2px solid lightslategrey;
+  margin: 3px 0;
+}
+ol, li {
+  padding: 0;
+  margin: 0;
+}
+#sourcetext {
+  flex-grow: 1;
+  height: 10em;
+}
+</style>
 
-<textarea id="repl"></textarea>
-<button id="runit" type="button">
-  run
-</button>
+<div role="toolbar">
+  <button id="pause_or_play" title="play" type="button">
+    |>
+  </button>
+</div>
 
+<ol id="scrollback" role="log">
+</ol>
+
+<div id="sourcetext">
+</div>
+
+<script src="/node_modules/monaco-editor/dev/vs/loader.js"></script>
 <script>
-const url = 'ws://127.0.0.1:9229/e9d17c32-1787-4f42-8a48-a683a69babd4';
-
 (async () => {
+  require.config({ paths: { 'vs': '/node_modules/monaco-editor/dev/vs' }});
+  await {
+    then(fulfill) {
+      require(['vs/editor/editor.main'], fulfill)
+    }
+  };
+  // global .monaco exists after this
+
+  const editor = monaco.editor.create(sourcetext, {
+    language: 'javascript'
+  });
+  const [{id}] = await (
+    (await fetch('/json')).json()
+  );
+  const url = new URL(`ws://${location.hostname}:9229/${id}`);
   const ws = new WebSocket(url);
 
   const requests = new Map;
@@ -48,7 +102,8 @@ const url = 'ws://127.0.0.1:9229/e9d17c32-1787-4f42-8a48-a683a69babd4';
     console.log('receiving', obj);
     if ('method' in obj) {
       if (obj.method === 'Debugger.paused') {
-        button_img.src = 'play.png';
+        pause_or_play.title = 'play';
+        pause_or_play.textContent = '|>';
         pause_or_play.onclick = () => {
           makeRequest({
             method: 'Debugger.resume'
@@ -56,12 +111,16 @@ const url = 'ws://127.0.0.1:9229/e9d17c32-1787-4f42-8a48-a683a69babd4';
         }
       }
       if (obj.method === 'Debugger.resumed') {
-        button_img.src = 'pause.png';
+        pause_or_play.title = 'pause';
+        pause_or_play.textContent = '||';
         pause_or_play.onclick = () => {
           makeRequest({
             method: 'Debugger.pause'
           });
         }
+      }
+      if (obj.method === 'Runtime.consoleAPICalled') {
+        addToScrollback(JSON.stringify(obj.params.args), obj.params.timestamp);
       }
     } else if ('error' in obj) {
       requests.get(obj.id).reject(obj.error);
@@ -86,19 +145,78 @@ const url = 'ws://127.0.0.1:9229/e9d17c32-1787-4f42-8a48-a683a69babd4';
   await makeRequest({
     method: 'Runtime.runIfWaitingForDebugger'
   });
-  runit.onclick = async () => {
-    const text = repl.value;
-    const response = await makeRequest({
-      method: 'Debugger.evaluateOnCallFrame',
-      params: {
-        expression: text,
-        callFrameId: `{"ordinal":0,"injectedScriptId":1}`,
-        returnByValue: true
-      }
-    });
-    repl.value = response.result.value;
+  function addToScrollback(content) {
+    const item = document.createElement('li');
+    debugger;
+    const shouldFocus = scrollback.scrollTop + scrollback.clientHeight === scrollback.scrollHeight;
+    if (typeof content === 'string') {
+      item.textContent = content;
+    } else {
+      item.appendChild(content);
+    }
+    scrollback.appendChild(item);
+    if (shouldFocus) {
+      scrollback.scrollTop = scrollback.scrollHeight;
+    }
   }
+  editor.onKeyUp(async (e) => {
+    if (e.code === 'Enter') {
+      if (!e.shiftKey) {
+        e.preventDefault();
+        let oldModel = editor.getModel();
+        const text = oldModel.getValue();
+        addToScrollback(text);
+        editor.setModel(
+          monaco.editor.createModel(
+            '', 'javascript'
+          )
+        );
+        oldModel.dispose();
+        try {
+          const response = await makeRequest({
+            method: 'Debugger.evaluateOnCallFrame',
+            params: {
+              expression: text,
+              callFrameId: `{"ordinal":0,"injectedScriptId":1}`
+            }
+          });
+          if (response.exceptionDetails) {
+            addToScrollback(
+              `ERROR: ${response.exceptionDetails.text}`
+            );
+          }
+          addToScrollback(
+            createRemoteObjectView(response.result)
+          );
+        } catch (e) {
+          debugger;
+          addToScrollback(
+            `ERROR: ${e}`
+          );
+        }
+      }
+    }
+  });
   await init;
 })();
 
+function createRemoteObjectView(ref) {
+  switch (ref.type) {
+    case 'object':
+    case 'function':
+      debugger;
+      const view = document.importNode(objectTemplate.content, true);
+      view.querySelector('summary').textContent = ref.className;
+      return view;
+    case 'string':
+    case 'number':
+    case 'boolean':
+      return document.createTextNode(ref.value);
+    case 'undefined':
+      return document.createTextNode('undefined');
+    default: debugger;
+  }
+}
 </script>
+<template id="objectTemplate"><details><summary></summary><table></table></details></template>
+<template id="propertyTemplate"><tr><th></th><td></td></tr></template>
