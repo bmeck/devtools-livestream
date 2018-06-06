@@ -1,222 +1,229 @@
 <!doctype html>
-
-<style>
-* {
-  box-sizing: border-box;
-  font-family: monospace;
-}
-html, body {
-  width: 100%;
-  height: 100%;
-  padding: 0;
-  margin: 0;
-}
-body {
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-}
-[role="log"] {
-  overflow: auto;
-  list-style: none;
-  flex-grow: 0;
-}
-[role="log"] li + li::before {
-  content: "";
-  display: block;
-  border-top: 2px solid lightslategrey;
-  margin: 3px 0;
-}
-ol, li {
-  padding: 0;
-  margin: 0;
-}
-#sourcetext {
-  flex-grow: 1;
-  height: 10em;
-}
-</style>
+<link rel=stylesheet href=style.css>
 
 <div role="toolbar">
-  <button id="pause_or_play" title="play" type="button">
+  <button id="play" title="play" type="button" disabled>
     |>
   </button>
+  <button id="pause" title="play" type="button" disabled>
+    ||
+  </button>
+  <button id="snapshot" title="take snapshot" type="button">
+    take snapshot
+  </button>
 </div>
-
-<ol id="scrollback" role="log">
-</ol>
-
-<div id="sourcetext">
+<div id="state">
+  <details>
+    <summary>Callstack</summary>
+    <ul id="callstack"></ul>
+  </details>
+  <details>
+    <summary>Sources</summary>
+    <ul id="sources"></ul>
+  </details>
+  <textarea id="source" disabled></textarea>
 </div>
-
-<script src="/node_modules/monaco-editor/dev/vs/loader.js"></script>
-<script>
-(async () => {
-  require.config({ paths: { 'vs': '/node_modules/monaco-editor/dev/vs' }});
-  await {
-    then(fulfill) {
-      require(['vs/editor/editor.main'], fulfill)
+<div id="content" role="main">
+  <ol id="scrollback" role="log"></ol>
+  <textarea id="sourcetext"></textarea>
+</div>
+<dialog id="objectIdContextMenu">
+  <button>Save to variable</button>
+</dialog>
+<script type="module">
+import {has} from './util.mjs';
+import DevtoolsConnection from './DevtoolsConnection.mjs';
+import RemoteObjectFormatter from './remote_object/RemoteObjectFormatter.mjs';
+import RemoteObject from './remote_object/RemoteObject.mjs';
+;(async () => {
+  oncontextmenu = e => {
+    let hasRemoteId = e.target;
+    while (hasRemoteId) {
+      if (has(hasRemoteId.dataset, 'objectId')) {
+        e.preventDefault();
+        objectIdContextMenu.dataset.objectId = hasRemoteId.dataset.objectId;
+        objectIdContextMenu.showModal();
+      }
+      hasRemoteId = hasRemoteId.parentNode;
     }
   };
-  // global .monaco exists after this
+  objectIdContextMenu.onclick = e => {
+    const rect = objectIdContextMenu.getBoundingClientRect();
+    const isInDialog=(rect.top <= e.clientY && e.clientY <= rect.top + rect.height
+      && rect.left <= e.clientX && e.clientX <= rect.left + rect.width);
+    if (!isInDialog) {
+      objectIdContextMenu.close();
+    }
+  }
+  play.onclick = () => conn.request({method: 'Debugger.resume'});
+  pause.onclick = () => conn.request({method: 'Debugger.pause'});
+  snapshot.onclick = () => [
+    conn.request({method: 'HeapProfiler.takeHeapSnapshot'}),
+    conn.request({method: 'HeapProfiler.takeHeapSnapshot'})
+  ];
 
-  const editor = monaco.editor.create(sourcetext, {
-    language: 'javascript'
-  });
-  const [{id}] = await (
-    (await fetch('/json')).json()
-  );
+  const METHOD_DISPATCH = {
+    __proto__: null,
+    ['Debugger.scriptParsed']({url, scriptId}) {
+      const elem = document.createElement('li');
+      elem.innerText = `${url}`;
+      elem.role = 'button';
+      elem.tabIndex = 0;
+      elem.onclick = async () => {
+        source.innerText = (await conn.request({
+          method: 'Debugger.getScriptSource',
+          params: {scriptId}
+        })).scriptSource;
+      };
+      sources.appendChild(elem);
+    },
+    ['Debugger.paused'](params) {
+      callstack.innerHTML = '';
+      const fragment = document.createDocumentFragment();
+      for (const frame of conn.callFrames) {
+        const elem = document.createElement('li');
+        const {lineNumber, columnNumber, scriptId} = frame.location;
+        elem.innerText = `${
+          conn.scripts.get(frame.location.scriptId).url
+        }#${lineNumber}:${columnNumber}`;
+        fragment.appendChild(elem);
+      }
+      callstack.appendChild(fragment);
+      play.disabled = false;
+      pause.disabled = true;
+    },
+    ['Debugger.resumed']() {
+      callstack.innerHTML = '';
+      play.disabled = true;
+      pause.disabled = false;
+    },
+    ['Runtime.consoleAPICalled'](params) {
+      addToScrollback({
+        items: params.args.map(source => {
+          return RemoteObject.fromRemoteObjectJSON({
+            connection: conn,
+            source
+          })
+        })
+      });
+    }
+  }
+
+  const [{id}] = await ((await fetch('/json')).json());
   const url = new URL(`ws://${location.hostname}:9229/${id}`);
-  const ws = new WebSocket(url);
-
-  const requests = new Map;
-  let next_id = 1;
-  async function makeRequest(obj) {
-    let id = next_id++;
-    const body = {
-      ...obj,
-      id,
-      type: 'request'
-    };
-    //console.debug('sending', body)
-    ws.send(JSON.stringify(body));
-    return {
-      then(fulfill, reject) {
-        requests.set(id, {
-          fulfill,
-          reject
-        });
-      }
-    };
-  }
-
-  await {
-    then(fulfill, reject) {
-      ws.onopen = fulfill;
-      ws.onerror = reject;
+  const conn = await new DevtoolsConnection(url, (method, params) => {
+    if (has(METHOD_DISPATCH, method)) {
+      METHOD_DISPATCH[method](params);
     }
-  };
-  ws.onerror = null;
-  ws.onmessage = async ({data}) => {
-    const obj = JSON.parse(data);
-    console.log('receiving', obj);
-    if ('method' in obj) {
-      if (obj.method === 'Debugger.paused') {
-        pause_or_play.title = 'play';
-        pause_or_play.textContent = '|>';
-        pause_or_play.onclick = () => {
-          makeRequest({
-            method: 'Debugger.resume'
-          });
-        }
-      }
-      if (obj.method === 'Debugger.resumed') {
-        pause_or_play.title = 'pause';
-        pause_or_play.textContent = '||';
-        pause_or_play.onclick = () => {
-          makeRequest({
-            method: 'Debugger.pause'
-          });
-        }
-      }
-      if (obj.method === 'Runtime.consoleAPICalled') {
-        addToScrollback(JSON.stringify(obj.params.args), obj.params.timestamp);
-      }
-    } else if ('error' in obj) {
-      requests.get(obj.id).reject(obj.error);
-    } else if ('result' in obj) {
-      requests.get(obj.id).fulfill(obj.result);
-    } else {
-      throw new Error(data);
-    }
-  };
-  console.log('connected');
-  const init = Promise.all([
-    makeRequest({
-      method: 'Runtime.enable'
-    }),
-    makeRequest({
-      method: 'Debugger.enable'
-    }),
-    makeRequest({
-      method: 'Debugger.pause'
-    })
-  ]);
-  await makeRequest({
-    method: 'Runtime.runIfWaitingForDebugger'
   });
-  function addToScrollback(content) {
-    const item = document.createElement('li');
-    debugger;
-    const shouldFocus = scrollback.scrollTop + scrollback.clientHeight === scrollback.scrollHeight;
-    if (typeof content === 'string') {
-      item.textContent = content;
+  // yolo debugging
+  window.conn = conn;
+  await conn.standardInit();
+  async function addToScrollback({
+    items: [format, ...items],
+    location
+  }) {
+    const shouldScroll = scrollback.scrollTop + scrollback.clientHeight === scrollback.scrollHeight;
+    if (format.type() !== 'string') {
+      items.unshift(format);
+      format = null;
     } else {
-      item.appendChild(content);
+      format = format.source.value;
     }
-    scrollback.appendChild(item);
-    if (shouldFocus) {
-      scrollback.scrollTop = scrollback.scrollHeight;
+    const fragment = document.createDocumentFragment();
+    let formatter = new RemoteObjectFormatter();
+    let placeholder_pattern = /%([sidfOc])/ug;
+    let last = 0;
+    formatting:
+    while (true) {
+      let container;
+      if (format) {
+        const match = placeholder_pattern.exec(format);
+        if (match) {
+          switch (match[1]) {
+            case 's':
+              container = await formatter.renderAsString(items.shift());
+              break;
+            case 'i':
+            case 'd':
+              container = await formatter.renderAsInteger(items.shift());
+              break;
+            case 'f':
+              container = await formatter.renderAsFloat(items.shift());
+              break;
+            case 'O':
+              container = await formatter.renderAsObject(items.shift());
+              break;
+            case 'c':
+              formatter = new RemoteObjectFormatter(items.shift());
+            default:
+              continue formatting;
+          }
+          fragment.appendChild(
+            formatter.renderString(format.slice(last, match.index))
+          );
+          last = placeholder_pattern.lastIndex;
+        } else {
+          fragment.appendChild(
+            formatter.renderString(format.slice(last, format.length))
+          );
+          format = null;
+          continue formatting;
+        }
+      } else if (items.length) {
+        container = await formatter.renderAsObject(items.shift());
+      } else {
+        break;
+      }
+      fragment.appendChild(container);
     }
+    const li = document.createElement('li');
+    li.appendChild(fragment);
+    scrollback.appendChild(li);
   }
-  editor.onKeyUp(async (e) => {
+  sourcetext.onkeydown = async (e) => {
     if (e.code === 'Enter') {
       if (!e.shiftKey) {
         e.preventDefault();
-        let oldModel = editor.getModel();
-        const text = oldModel.getValue();
-        addToScrollback(text);
-        editor.setModel(
-          monaco.editor.createModel(
-            '', 'javascript'
-          )
-        );
-        oldModel.dispose();
+        const text = e.target.value;
+        addToScrollback({
+          items: [RemoteObject.fromValue({
+            connection: conn,
+            value: '%s'
+          }),
+          RemoteObject.fromValue({
+            connection: conn,
+            value: text
+          })]
+        });
+        e.target.value = '';
         try {
-          const response = await makeRequest({
+          const response = await conn.request({
             method: 'Debugger.evaluateOnCallFrame',
             params: {
               expression: text,
-              callFrameId: `{"ordinal":0,"injectedScriptId":1}`
+              callFrameId: conn.callFrames.slice(-1)[0].callFrameId
             }
           });
           if (response.exceptionDetails) {
-            addToScrollback(
-              `ERROR: ${response.exceptionDetails.text}`
-            );
+            addToScrollback({
+              items: [RemoteObject.fromValue(`ERROR: ${response.exceptionDetails.text}`)]
+            });
           }
-          addToScrollback(
-            createRemoteObjectView(response.result)
-          );
+          addToScrollback({
+            items: [RemoteObject.fromRemoteObjectJSON({
+              connection: conn,
+              source: response.result
+            })]
+          });
         } catch (e) {
           debugger;
-          addToScrollback(
-            `ERROR: ${e}`
-          );
+          addToScrollback({
+            items: [RemoteObject.fromValue(`ERROR: ${e}`)]
+          });
         }
       }
     }
-  });
-  await init;
+  };
 })();
-
-function createRemoteObjectView(ref) {
-  switch (ref.type) {
-    case 'object':
-    case 'function':
-      debugger;
-      const view = document.importNode(objectTemplate.content, true);
-      view.querySelector('summary').textContent = ref.className;
-      return view;
-    case 'string':
-    case 'number':
-    case 'boolean':
-      return document.createTextNode(ref.value);
-    case 'undefined':
-      return document.createTextNode('undefined');
-    default: debugger;
-  }
-}
 </script>
-<template id="objectTemplate"><details><summary></summary><table></table></details></template>
-<template id="propertyTemplate"><tr><th></th><td></td></tr></template>

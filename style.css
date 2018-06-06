@@ -1,0 +1,56 @@
+* {
+  box-sizing: border-box;
+  font-family: monospace;
+}
+html, body {
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  margin: 0;
+}
+body {
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+}
+[role="log"] {
+  list-style: none;
+  white-space: pre;
+}
+[role="log"] li + li::before {
+  content: "";
+  display: block;
+  border-top: 2px solid lightslategrey;
+  margin: 3px 0;
+}
+ol, li {
+  padding: 0;
+  margin: 0;
+}
+#content {
+  overflow: auto;
+  flex-grow: 1;
+}
+#sourcetext {
+  width: 100%;
+}
+#state {
+  display:flex;
+  flex-direction: row;
+  overflow: auto;
+  width: 100%;
+}
+.objectTree {
+  display: inline-block;
+}
+.propertyRow {
+  vertical-align: top;
+}
+.propertyRow.internal > th {
+  color: gray;
+}
+#source {
+  display: block;
+  flex-basis: 1;
+  flex-grow: 1;
+}
